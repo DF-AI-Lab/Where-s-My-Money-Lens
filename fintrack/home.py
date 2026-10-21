@@ -1,0 +1,184 @@
+"""Step 9 of SPEC.md: the home page data aggregation."""
+from datetime import date
+from typing import Optional
+
+from fintrack.cycles import build_cycles
+from fintrack.common import analyse
+from fintrack.spare import pay_block, last_cycle_check
+from fintrack.where import where_did_it_go, where_summary
+from fintrack.bycategory import category_spending
+from fintrack.subs import find_subscriptions
+from fintrack.sparehist import spare_history
+from fintrack.picture import six_month_picture
+from fintrack.yearly import yearly_due
+from fintrack.periods import period_totals
+from fintrack.creditcard import get_card
+from fintrack.store import load_txns, get_items, get_rules, get_categories, get_spends, get_value
+
+
+def home_data(conn, wage_payer, wage=None, today=None) -> dict:
+    """Load and aggregate all data for the home page.
+
+    Args:
+        conn: sqlite3 connection
+        wage_payer: the wage payer name (e.g. "ACME MOTORS PLC")
+        wage: optional fixed wage; if None, uses saved "pay" value or last cycle wage
+        today: optional reference date; if None, uses max transaction date
+
+    Returns:
+        dict with ready=False if no data, else dict with all page data
+    """
+    # Load all the data
+    from fintrack.early import load_moved
+    from fintrack.wages import all_payers
+    txns = sorted(load_moved(conn, all_payers(conn, wage_payer)), key=lambda t: t.date)
+
+    if not txns:
+        return {"ready": False}
+
+    from fintrack.wages import all_payers
+    cycles = build_cycles(txns, payer=all_payers(conn, wage_payer))
+    # No. 6: new items to sort on the page (first, so DD/SO saved as bills by auto_bills count straight away)
+    from fintrack.sortpage import pending_for_page, category_names, ai_prompt
+    sort = pending_for_page(conn, txns)
+    # No. 6c: same bill / rent / typed spend questions (typed spends found in the statements are removed here)
+    from fintrack.pagequestions import questions
+    more = questions(conn, txns, [c.start for c in cycles], payers=all_payers(conn, wage_payer))
+    answers = get_items(conn)
+    rules = get_rules(conn)
+    categories = get_categories(conn)
+
+    analysis = analyse(cycles, answers=answers, rules=rules)
+    # v3 bill swaps (fintrack/v3/billswap.py): the bills leave out the old payee from the swap on; no swaps = the same
+    from fintrack.v3.billswap import bill_txns, get_swaps, items_of
+    btxns = bill_txns(conn, txns, [c.start for c in cycles])
+    bill_cycles, bill_analysis = cycles, analysis
+    if btxns is not txns:
+        bill_cycles = build_cycles(btxns, payer=all_payers(conn, wage_payer))
+        bill_analysis = analyse(bill_cycles, answers=answers, rules=rules)
+
+    # Check if we have enough data
+    if not cycles or analysis.cycles_used == 0:
+        return {"ready": False}
+
+    # Determine wage
+    if wage is None:
+        saved_wage = get_value(conn, "pay")
+        if saved_wage is not None:
+            try:
+                wage = float(saved_wage)
+            except (ValueError, TypeError):
+                wage = cycles[-1].wage
+        else:
+            wage = cycles[-1].wage
+
+    # Determine today
+    if today is None:
+        today = max(t.date for t in txns)
+
+    # Get yearly due
+    due = yearly_due(txns, answers, today=today)
+
+    # Build the pay block
+    from fintrack.billchange import get_changes, get_left, get_stopped
+    pay = pay_block(bill_cycles, bill_analysis, wage, categories=categories, items=answers, yearly=due,
+                    changes=get_changes(conn, cycles[-1].start), left=get_left(conn, cycles[-1].start),
+                    stopped=get_stopped(conn))
+    swapped = {s["bill"] for s in get_swaps(conn)}
+    for b in pay["bills"]:
+        b["swapped"] = b["key"] in swapped                   # ⋯ menu: Split back out
+        b["joinable"] = bool(items_of(answers, b["key"]))    # ⋯ menu: Replaces…
+
+    # Get last cycle check
+    last = last_cycle_check(cycles, answers=answers, rules=rules)
+
+    # Get where did it go
+    where = None
+    if last is not None:
+        w = where_did_it_go(cycles, answers=answers, rules=rules, categories=categories, items=answers)
+        where = where_summary(w)
+
+    # Get spending by category
+    cats = category_spending(cycles, items=answers, categories=categories, rules=rules)
+
+    # Get subscriptions
+    subs = find_subscriptions(txns, items=answers)
+
+    # Get typed spends
+    spends = get_spends(conn)
+
+    # Get money for spending
+    money = pay["spare"]                     # pay - bills, with any bill changed for this cycle
+
+    # Calculate left_now
+    left_now = money - sum(s["amount"] for s in spends)
+
+    # Get picture
+    picture = six_month_picture(cycles, analysis, items=answers, categories=categories)
+
+    # Get statements_to (max transaction date)
+    statements_to = max(t.date for t in txns)
+
+    # Get periods data
+    periods = period_totals(cycles, answers=answers, rules=rules)
+
+    # The user's own order and names (page only, fintrack/layout.py)
+    from fintrack.layout import get_layout, apply_order, CARDS
+    lay = get_layout(conn)
+    order, names = lay["order"], lay["names"]
+
+    def named(rows, make_id, field):
+        for r in rows:
+            r["id"] = make_id(r)
+            r["orig"] = r[field]
+            r["name"] = names.get(r["id"], r[field])
+        return rows
+
+    pay["bills"] = apply_order(named(pay["bills"], lambda b: "bill:" + b["key"], "name"), order.get("bills", []), lambda r: r["id"])
+    pay["spending"] = apply_order(named(pay["spending"], lambda r: "cat:" + r["category"], "category"),
+                                  order.get("lastmonth", []), lambda r: r["id"])
+    cats["rows"] = apply_order(named(cats["rows"], lambda r: "cat:" + r["category"], "category"),
+                               order.get("cats", []), lambda r: r["id"])
+    for group in ("active", "stopped"):
+        subs[group] = apply_order(named(subs[group], lambda r: "sub:" + r["name"], "name"),
+                                  order.get("subs-" + group, []), lambda r: r["id"])
+    cards = apply_order(list(CARDS), order.get("cards", []), lambda c: c)
+
+    cat_names = category_names(conn)
+    for q in more:                                           # v3: the bills a new bill can replace
+        if q["type"] == "newbill":
+            q["bills"] = [{"key": b["key"], "name": b["name"]} for b in pay["bills"]
+                          if b["joinable"] and b["key"] != q["bill"]]
+
+    return {
+        "ready": True,
+        "sort": sort,
+        "more": more,
+        "category_names": cat_names,
+        "ai_text": ai_prompt(sort, cat_names) if sort else "",
+        "cards": cards,
+        "pay": pay,
+        "last": last,
+        "where": where,
+        "categories": cats,
+        "subs": subs,
+        "spends": spends,
+        "money_for_spending": money,
+        "left_now": left_now,
+        "typed_total": money - left_now,
+        "cycle_start": cycles[-1].start,
+        "history": spare_history(cycles, analysis),
+        "picture": picture,
+        "statements_to": statements_to,
+        "periods": periods,
+        "card": get_card(conn),
+    }
+
+
+def txns_and_paydays(conn, wage_payer):
+    """The payments and paydays the page works from (for answering the questions on the page)."""
+    from fintrack.early import load_moved
+    from fintrack.wages import all_payers
+    txns = sorted(load_moved(conn, all_payers(conn, wage_payer)), key=lambda t: t.date)
+    cycles = build_cycles(txns, payer=all_payers(conn, wage_payer)) if txns else []
+    return txns, [c.start for c in cycles], all_payers(conn, wage_payer)

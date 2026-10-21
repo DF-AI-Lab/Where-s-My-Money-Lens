@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+# your REAL statements never go in git
+statements/*
+!statements/README.txt
+real_statements/
+*.pdf
+!tests/data/*.pdf
+output/
+
+# your real data stays on your PC
+*.db
+
+# the online copy keeps its data here (on PythonAnywhere only)
+cloud/data/
+version.txt
+
+# v3: the website data folder (database, settings with passwords, backups) never goes in git
+v3data/
+wmm-data/
+v3_settings.json
+backups/
+
+# agent worktrees (temporary)
+.claude/worktrees/

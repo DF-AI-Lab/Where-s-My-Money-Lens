@@ -1,0 +1,114 @@
+"""14 Oct 2026: the new look (built on /demo, now the main page /). The phone page keeps the old look for now. Fake data only."""
+import re
+
+import pytest
+
+from tests.test_web import ACME, client, db  # noqa: F401  (fixtures)
+
+pytest.importorskip("flask")
+
+FORMS = ["/add", "/card/add", "/card/balance", "/card/limit", "/card/remove", "/layout/reset", "/left", "/pay",
+         "/remove", "/stopped"]
+
+
+def forms(html):
+    return sorted(set(re.findall(r'action="(/[a-z/]*)"', html)))
+
+
+def test_page_has_the_new_name_icon_rings_and_header(client):
+    html = client.get("/").get_data(as_text=True)
+    assert "Where's My Money?" in html and "Payday to payday" in html
+    assert 'id="ring"' in html and 'id="zring"' in html                  # the spare cash ring and the Zopa ring
+    assert 'id="st-bills"' in html and 'id="st-spends"' in html         # statement rows
+    assert 'class="demohead"' in html and 'id="setbtn"' in html         # fixed header with Settings
+    assert 'id="editbtn"' in html and 'id="updbtn"' in html             # the buttons Settings opens
+    from fintrack.appversion import VERSION
+    assert f"v{VERSION}" in html and "demo.v" not in html               # which version is running
+
+
+def test_page_keeps_every_form_and_card(client):
+    client.post("/add", data={"amount": "3.50", "name": "Costa"})
+    client.post("/card/add", data={"amount": "40", "name": "Shell"})
+    client.post("/left", data={"amount": "20"})
+    html = client.get("/").get_data(as_text=True)
+    assert forms(html) == FORMS
+    for text in ("Add a spend", "Credit card", "Bills (every month)", "Last month's spending",
+                 "Spending by category", "Subscriptions", "6 months, 12 months and this year",
+                 'id="payform"', 'id="spare-big"', 'id="mfs"', 'id="leftnow"', 'id="ccused"', 'id="ccfree"'):
+        assert text in html, text
+
+
+def test_demo_is_the_same_page_from_its_own_copy(client):
+    main = client.get("/").get_data(as_text=True)
+    demo = client.get("/demo").get_data(as_text=True)
+    assert 'href="/static/look.css' in main and 'href="/demo/static/look.css' in demo
+    assert 'class="lite">Lite</span>' in main and 'class="lite">Lite</span>' in demo
+    assert 'id="payform"' in demo
+    assert client.get("/demo/static/look.css").status_code == 200
+    assert client.get("/demo/static/nothing.css").status_code == 404
+    assert client.get("/demo/static/../../web.py").status_code == 404
+
+
+def test_changes_go_back_to_the_page_they_came_from(client):
+    r = client.post("/add", data={"amount": "3.50", "name": "Costa"})
+    assert r.status_code == 303 and r.headers["Location"].endswith("/")
+    r = client.post("/add", data={"amount": "3.50", "name": "Costa"}, headers={"Referer": "http://x/demo"})
+    assert r.status_code == 303 and r.headers["Location"].endswith("/demo")
+
+
+def test_new_payday_panel(client):
+    html = client.get("/").get_data(as_text=True)
+    assert 'id="quick" hidden' in html and 'id="quicktab"' in html           # hidden until the arrow tab is pressed
+    panel = html[html.index('id="quick"'):html.index('class="st-grid"')]
+    assert 'action="/pay"' in panel and 'id="qleft"' in panel and "Work it out" in panel
+
+
+def test_bills_card_keeps_every_bill_button(client, db):
+    from fintrack.home import home_data
+    from fintrack.store import open_db
+    n = len(home_data(open_db(db), wage_payer=ACME)["pay"]["bills"])
+    html = client.get("/").get_data(as_text=True)
+    assert 'class="dbills"' in html
+    assert html.count('<tr class="bill') == n
+    assert html.count('action="/stopped"') == n and html.count('class="amount billbox"') == n
+
+
+def test_last_month_rows_and_bill_buttons(client):
+    html = client.get("/").get_data(as_text=True)
+    assert 'class="dlast"' in html and 'data-sort="lastmonth"' in html
+    table = html.split('class="dlast"')[1].split("</table>")[0]
+    assert table.count('class="item"') == table.count('class="small tobill"') > 0   # every shop row has its → Bill
+
+
+def test_phone_page_keeps_the_old_look(db):
+    import web
+    html = web.phone_page(db, wage_payer=ACME)
+    assert "Where's My Money?" not in html and "💳 Credit card" in html
+
+
+def test_tags_are_split_off_the_bill_name():
+    import web
+    app = web.create_app(":memory:")
+    f = app.jinja_env.filters["tagsplit"]
+    assert f("Rent KT (Household) (BP)") == ("Rent KT", ["Household", "BP"])
+    assert f("Council Tax") == ("Council Tax", [])
+
+
+def test_spend_and_card_errors_show_in_their_own_card_and_fade(client):
+    """15 Oct 2026 (Darren): the 'type an amount' error sits in the Add a spend card, not at the top, and goes after 5 s."""
+    html = client.post("/add", data={"amount": "", "name": ""}, follow_redirects=True).get_data(as_text=True)
+    msg = "Sorry, type an amount and a name, e.g. 12.50 and Costa."
+    assert html.count(msg) == 1
+    assert html.index('data-card="spend"') < html.index(msg) < html.index('action="/add"')
+    assert 'class="error fade"' in html                                   # the page script fades it after 5 seconds
+    html = client.post("/card/add", data={"amount": "", "name": ""}, follow_redirects=True).get_data(as_text=True)
+    msg = "Sorry, type an amount and a name for the credit card, e.g. 40 and Shell."
+    assert html.count(msg) == 1
+    assert html.index('data-card="card"') < html.index(msg) < html.index('action="/card/add"')
+
+
+def test_settings_has_cards_open_at_once(client):
+    """15 Oct 2026 (Darren): only N cards open at once (default 2); opening one more folds the oldest. N is per device."""
+    html = client.get("/").get_data(as_text=True)
+    assert 'id="maxopen"' in html and "Cards open at once" in html
+    assert "ft_maxopen" in html and "ft_openorder" in html               # kept in the browser, like the folding
