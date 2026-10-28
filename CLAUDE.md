@@ -1,12 +1,13 @@
-# Where's My Money? Lite
+# Where's My Money? Lens
 
-**THIS REPO = LITE (made 21 Oct 2026, v0.01).** A full copy of the financial-tracker v3 app (v3.62) to grow the Lite
-app in. The main app lives in DF-AI-Lab/financial-tracker: never change that repo from here.
-- `/` = templates/ + static/ (the v3 page + a 'Lite' badge). `/demo` = demo/templates + demo/static (a copy to try
+**THIS REPO = LENS (made 28 Oct 2026, v0.01).** The full version, with AI later (the user's own API key).
+Started as a copy of DF-AI-Lab/wheres-my-money-lite (Lite v0.01). Lite stays as the free app with no AI.
+The old app DF-AI-Lab/financial-tracker is archived: never change it from here.
+- `/` = templates/ + static/ (the v3 page + a 'Lens' badge). `/demo` = demo/templates + demo/static (a copy to try
   changes on first; web.home(folder=...)). Changes made on /demo go back to /demo.
 - Version: fintrack/appversion.py, starts at 0.01, +0.01 per push.
-- Plan: map = financial-tracker issue #22. Next: trim what Lite doesn't need (PC .bat files, v2 phone parts,
-  prototypes), then ticket #25 Bill details. Not online yet (later: same PythonAnywhere site at /lite).
+- Data: the old live site (PythonAnywhere) was left to expire on purpose; the user will load the statement PDFs
+  into Lens again. The PythonAnywhere account can host Lens later.
 - Everything below is the main app's history, kept for now.
 
 ---
