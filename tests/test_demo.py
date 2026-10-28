@@ -42,7 +42,7 @@ def test_demo_is_the_same_page_from_its_own_copy(client):
     main = client.get("/").get_data(as_text=True)
     demo = client.get("/demo").get_data(as_text=True)
     assert 'href="/static/look.css' in main and 'href="/demo/static/look.css' in demo
-    assert 'class="lite">Lite</span>' in main and 'class="lite">Lite</span>' in demo
+    assert 'class="lite">Lens</span>' in main and 'class="lite">Lens</span>' in demo
     assert 'id="payform"' in demo
     assert client.get("/demo/static/look.css").status_code == 200
     assert client.get("/demo/static/nothing.css").status_code == 404
